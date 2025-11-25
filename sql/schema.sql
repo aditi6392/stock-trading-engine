@@ -8,3 +8,15 @@ CREATE TABLE IF NOT EXISTS orders (
     quantity NUMERIC NOT NULL,
     created_at TIMESTAMP DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS trades (
+    id UUID PRIMARY KEY,
+    buy_order_id UUID NOT NULL,
+    sell_order_id UUID NOT NULL,
+    instrument VARCHAR(20) NOT NULL,
+    price NUMERIC NOT NULL,
+    quantity NUMERIC NOT NULL,
+    traded_at TIMESTAMP DEFAULT NOW(),
+
+    FOREIGN KEY (buy_order_id) REFERENCES orders(id),
+    FOREIGN KEY (sell_order_id) REFERENCES orders(id)
+);
