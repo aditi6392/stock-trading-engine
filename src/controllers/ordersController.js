@@ -1,22 +1,18 @@
+// controllers/ordersController.js
 const ordersService = require("../services/ordersService");
 const matchingEngine = require("../engine/matchingEngine");
+//const matchingEngine = require("../engine/matchingEngine");
+console.log("Loaded matchingEngine:", matchingEngine);
 
 // ----------------------------------------------------
 // CREATE ORDER (+ matching engine)
 // ----------------------------------------------------
 exports.createOrder = async (req, res) => {
   try {
-    const order = await ordersService.createOrder(req.body);
-
-    // Run matching engine
-    let trades = [];
-    try {
-      trades = await matchingEngine.matchOrder(order);
-    } catch (err) {
-      console.error("Matching Engine Error:", err);
-    }
-
-    res.json({ order, trades });
+    // Let the service create the order AND call the matching engine.
+    const result = await ordersService.createOrder(req.body);
+    // result contains { order, trades }
+    res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

@@ -1,10 +1,13 @@
 const pool = require("../db");
 const { v4: uuidv4 } = require("uuid");
-const { matchOrder}=require("../engine/matchingEngine");
+const matchingEngine = require("../engine/matchingEngine");
+
 // ----------------------------------------------------
-// CREATE ORDER
+// CREATE ORDER (Supports idempotency)
 // ----------------------------------------------------
-exports.createOrder = async (data) => {
+exports.createOrder = async (data, opts = {}) => {
+  const idempotencyKey = opts.idempotency_key || data.idempotency_key || null;
+
   if (!data.client_id) throw new Error("client_id required");
   if (!data.instrument) throw new Error("instrument required");
   if (!data.side) throw new Error("side must be buy or sell");
@@ -12,8 +15,23 @@ exports.createOrder = async (data) => {
   if (data.type === "limit" && !data.price)
     throw new Error("price required for limit order");
 
-  const client = await pool.connect();
+  // Check idempotency
+  if (idempotencyKey) {
+    const existing = await pool.query(
+      `SELECT * FROM orders WHERE idempotency_key = $1 LIMIT 1`,
+      [idempotencyKey]
+    );
+    if (existing.rows.length > 0) {
+      const existingOrder = existing.rows[0];
+      const tradesRes = await pool.query(
+        `SELECT * FROM trades WHERE buy_order_id=$1 OR sell_order_id=$1 ORDER BY traded_at DESC`,
+        [existingOrder.id]
+      );
+      return { order: existingOrder, trades: tradesRes.rows };
+    }
+  }
 
+  const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
@@ -22,8 +40,8 @@ exports.createOrder = async (data) => {
 
     const insertResult = await client.query(
       `INSERT INTO orders
-        (id, client_id, instrument, side, type, price, quantity, remaining_quantity, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 'open')
+        (id, client_id, instrument, side, type, price, quantity, remaining_quantity, status, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 'open', $8)
        RETURNING *`,
       [
         orderId,
@@ -33,6 +51,7 @@ exports.createOrder = async (data) => {
         data.type,
         price,
         data.quantity,
+        idempotencyKey,
       ]
     );
 
@@ -40,15 +59,29 @@ exports.createOrder = async (data) => {
 
     await client.query("COMMIT");
 
-    // 🚀 MATCHING ENGINE CALL HERE
-    const trades = await matchOrder(newOrder);
+    // MATCHING ENGINE CALL
+    const trades = await matchingEngine.matchOrder(newOrder);
 
-    return {
-      order: newOrder,
-      trades: trades,
-    };
+    return { order: newOrder, trades };
   } catch (err) {
     await client.query("ROLLBACK");
+
+    // Handle unique violation on idempotency key
+    if (err.code === "23505" && idempotencyKey) {
+      const existing = await pool.query(
+        `SELECT * FROM orders WHERE idempotency_key = $1 LIMIT 1`,
+        [idempotencyKey]
+      );
+      if (existing.rows.length > 0) {
+        const existingOrder = existing.rows[0];
+        const tradesRes = await pool.query(
+          `SELECT * FROM trades WHERE buy_order_id=$1 OR sell_order_id=$1 ORDER BY traded_at DESC`,
+          [existingOrder.id]
+        );
+        return { order: existingOrder, trades: tradesRes.rows };
+      }
+    }
+
     throw err;
   } finally {
     client.release();
@@ -78,9 +111,7 @@ exports.getAllOrders = async () => {
 // ----------------------------------------------------
 exports.getOrdersByClient = async (clientId) => {
   const result = await pool.query(
-    `SELECT * FROM orders
-     WHERE client_id = $1
-     ORDER BY created_at DESC`,
+    `SELECT * FROM orders WHERE client_id=$1 ORDER BY created_at DESC`,
     [clientId]
   );
   return result.rows;
@@ -91,9 +122,7 @@ exports.getOrdersByClient = async (clientId) => {
 // ----------------------------------------------------
 exports.getOrdersByInstrument = async (instrument) => {
   const result = await pool.query(
-    `SELECT * FROM orders
-     WHERE instrument = $1
-     ORDER BY created_at DESC`,
+    `SELECT * FROM orders WHERE instrument=$1 ORDER BY created_at DESC`,
     [instrument]
   );
   return result.rows;
@@ -107,7 +136,7 @@ exports.getOrderbook = async (instrument, levels = 5) => {
     `SELECT price, remaining_quantity AS quantity, side
      FROM orders
      WHERE instrument = $1
-       AND type = 'limit'
+       AND type='limit'
        AND status IN ('open','partially_filled')
        AND price IS NOT NULL`,
     [instrument]
@@ -141,13 +170,13 @@ exports.getOrderbook = async (instrument, levels = 5) => {
 };
 
 // ----------------------------------------------------
-// ORDERBOOK FOR ALL INSTRUMENTS
+// FULL ORDERBOOK
 // ----------------------------------------------------
 exports.getFullOrderbook = async () => {
   const result = await pool.query(
     `SELECT instrument, price, remaining_quantity AS quantity, side
      FROM orders
-     WHERE type = 'limit'
+     WHERE type='limit'
        AND status IN ('open','partially_filled')`
   );
 
@@ -170,7 +199,6 @@ exports.getFullOrderbook = async () => {
     }
   }
 
-  // Build response format
   const final = {};
 
   for (let inst in book) {
@@ -192,21 +220,16 @@ exports.getFullOrderbook = async () => {
 // CANCEL ORDER
 // ----------------------------------------------------
 exports.cancelOrder = async (id) => {
-  const res = await pool.query(`SELECT * FROM orders WHERE id = $1`, [id]);
+  const res = await pool.query(`SELECT * FROM orders WHERE id=$1`, [id]);
   const order = res.rows[0];
 
   if (!order) throw new Error("Order not found");
-
   if (order.status === "filled")
     throw new Error("Cannot cancel a filled order");
-
   if (order.status === "cancelled") throw new Error("Order already cancelled");
 
   const result = await pool.query(
-    `UPDATE orders
-     SET status = 'cancelled'
-     WHERE id = $1
-     RETURNING *`,
+    `UPDATE orders SET status='cancelled' WHERE id=$1 RETURNING *`,
     [id]
   );
 
