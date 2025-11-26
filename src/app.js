@@ -1,17 +1,49 @@
-const express=require("express");
-const app=express();
+const express = require("express");
+const app = express();
 require("dotenv").config();
 
+// --------------------
+// Matching Engine
+// --------------------
+const matchingEngine = require("./engine/matchingEngine");
+
+// Initialize matching engine BEFORE routes
+(async () => {
+  try {
+    await matchingEngine.init();
+    console.log("⚡ Matching engine initialized");
+  } catch (err) {
+    console.error("❌ Failed to initialize matching engine:", err);
+    process.exit(1); // Stop server if engine isn't ready
+  }
+})();
+
+// --------------------
+// Middleware
+// --------------------
 app.use(express.json());
 
-//Routes
-const ordersRoute=require("./routes/orders");
-app.use("/orders",ordersRoute);
+// --------------------
+// ROUTES
+// --------------------
 
-//health cheeck
-app.get("/healthz",(req,res)=>res.json({status:"ok"}));
+// Orders routes
+const ordersRoute = require("./routes/orders");
+app.use("/orders", ordersRoute);
 
-const PORT=process.env.PORT || 3000;
-app.listen(PORT,()=>console.log("Server running on port",PORT));
+// Trades routes
+const tradesRoutes = require("./routes/tradesRoutes");
+app.use("/trades", tradesRoutes);
 
-module.exports=app;
+// --------------------
+// HEALTH CHECK
+// --------------------
+app.get("/healthz", (req, res) => res.json({ status: "ok" }));
+
+// --------------------
+// START SERVER
+// --------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("🚀 Server running on port", PORT));
+
+module.exports = app;

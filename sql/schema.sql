@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS orders (
     type VARCHAR(10) NOT NULL,
     price NUMERIC,
     quantity NUMERIC NOT NULL,
+     remaining_quantity NUMERIC NOT NULL ,
     created_at TIMESTAMP DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS trades (

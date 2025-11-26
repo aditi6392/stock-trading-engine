@@ -8,29 +8,33 @@ const {
   getOrdersByClient,
   getOrdersByInstrument,
   getOrderbook,
+  getFullOrderbook,
+  cancelOrder
 } = require("../controllers/ordersController");
 
-//get order book
-router.get("/orderbook", getOrderbook);
+// Orderbook for all instruments
+router.get("/orderbook", getFullOrderbook);
 
-// GET /orders/client/:client_id (client orders)
+// Orderbook for one instrument
+router.get("/orderbook/:instrument", getOrderbook);
+
+// Client orders
 router.get("/client/:client_id", getOrdersByClient);
 
-//get by instrument
+// Orders by instrument
 router.get("/instrument/:instrument", getOrdersByInstrument);
 
-
-// POST /orders
+// Create order
 router.post("/", createOrder);
 
-// GET /orders (all orders)
+// All orders
 router.get("/", getAllOrders);
 
-
-// GET /orders/:id (single order by ID)
+// Order by ID
 router.get("/:id", getOrderById);
-// POST /orders
-router.post("/", createOrder);
+
+// Cancel an order
+router.delete("/:id/cancel", cancelOrder);
 
 
 module.exports = router;

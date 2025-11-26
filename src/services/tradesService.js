@@ -1,6 +1,6 @@
 const pool = require("../db");
 const { v4: uuidv4 } = require("uuid");
-const { matchOrder}=require("../engine/matchingEngine");
+
 // ----------------------------------------------------
 // CREATE ORDER
 // ----------------------------------------------------
@@ -12,47 +12,26 @@ exports.createOrder = async (data) => {
   if (data.type === "limit" && !data.price)
     throw new Error("price required for limit order");
 
-  const client = await pool.connect();
+  const orderId = uuidv4();
+  const price = data.type === "limit" ? data.price : null;
 
-  try {
-    await client.query("BEGIN");
+  const result = await pool.query(
+    `INSERT INTO orders
+      (id, client_id, instrument, side, type, price, quantity, remaining_quantity, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 'open')
+     RETURNING *`,
+    [
+      orderId,
+      data.client_id,
+      data.instrument,
+      data.side,
+      data.type,
+      price,
+      data.quantity,
+    ]
+  );
 
-    const orderId = uuidv4();
-    const price = data.type === "limit" ? data.price : null;
-
-    const insertResult = await client.query(
-      `INSERT INTO orders
-        (id, client_id, instrument, side, type, price, quantity, remaining_quantity, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 'open')
-       RETURNING *`,
-      [
-        orderId,
-        data.client_id,
-        data.instrument,
-        data.side,
-        data.type,
-        price,
-        data.quantity,
-      ]
-    );
-
-    const newOrder = insertResult.rows[0];
-
-    await client.query("COMMIT");
-
-    // 🚀 MATCHING ENGINE CALL HERE
-    const trades = await matchOrder(newOrder);
-
-    return {
-      order: newOrder,
-      trades: trades,
-    };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  return result.rows[0];
 };
 
 // ----------------------------------------------------
@@ -170,7 +149,6 @@ exports.getFullOrderbook = async () => {
     }
   }
 
-  // Build response format
   const final = {};
 
   for (let inst in book) {
@@ -196,10 +174,8 @@ exports.cancelOrder = async (id) => {
   const order = res.rows[0];
 
   if (!order) throw new Error("Order not found");
-
   if (order.status === "filled")
-    throw new Error("Cannot cancel a filled order");
-
+    throw new Error("Cannot cancel a fully filled order");
   if (order.status === "cancelled") throw new Error("Order already cancelled");
 
   const result = await pool.query(
@@ -212,3 +188,4 @@ exports.cancelOrder = async (id) => {
 
   return result.rows[0];
 };
+
