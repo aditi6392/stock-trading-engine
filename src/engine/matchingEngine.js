@@ -1,9 +1,6 @@
 // engine/matchingEngine.js
 const pool = require("../db");
 const { v4: uuidv4 } = require("uuid");
-//const OrderBook = require("../services/orderBookService");
-//const tradesService = require("../services/tradesService");
-
 const OrderBook = require("../orderbook/orderBook");
 const tradesService = require("../services/tradesService");
 const ordersService = require("../services/ordersService");
@@ -296,107 +293,10 @@ async function runInstrumentQueue(instrument) {
     running[instrument] = false;
   }
 }
-
-// -------------------------
-// Public API
-// -------------------------
 const matchingEngine = {
-  init: async () => {
-    await loadOpenOrdersFromDb();
-  },
-
+  loadOpenOrdersFromDb,
   enqueueOrder,
-
-  matchOrderSync: async (order) => {
-    ensureBook(order.instrument);
-
-    if (order.type === "limit" && Number(order.remaining_quantity) > 0) {
-      addOrderToBook(order);
-    }
-
-    const trades = await processIncomingOrder(order);
-    return trades;
-  },
-
-  matchOrder: async (order) => {
-    const trades = await matchingEngine.matchOrderSync(order);
-    return trades;
-  },
+  processIncomingOrder,
 };
-// engine/matchingEngine.js
 
-module.exports = {
-  matchOrder: async (incomingOrder) => {
-    const trades = [];
-    const oppositeSide = incomingOrder.side === "buy" ? "sell" : "buy";
-
-    while (incomingOrder.remaining_quantity > 0) {
-      const bestOpp = await OrderBook.getTopOrder(
-        incomingOrder.instrument,
-        oppositeSide
-      );
-
-      if (!bestOpp) break;
-
-      // PRICE CHECK (limit only)
-      if (incomingOrder.type === "limit") {
-        if (incomingOrder.side === "buy" && bestOpp.price > incomingOrder.price)
-          break;
-
-        if (
-          incomingOrder.side === "sell" &&
-          bestOpp.price < incomingOrder.price
-        )
-          break;
-      }
-
-      const tradeQty = Math.min(
-        incomingOrder.remaining_quantity,
-        bestOpp.remaining_quantity
-      );
-
-      // CREATE TRADE
-      const trade = await tradesService.createTrade({
-        instrument: incomingOrder.instrument,
-        buy_order_id:
-          incomingOrder.side === "buy" ? incomingOrder.id : bestOpp.id,
-        sell_order_id:
-          incomingOrder.side === "sell" ? incomingOrder.id : bestOpp.id,
-        quantity: tradeQty,
-        price: bestOpp.price,
-      });
-
-      trades.push(trade);
-
-      // UPDATE quantities in memory
-      incomingOrder.remaining_quantity -= tradeQty;
-      bestOpp.remaining_quantity -= tradeQty;
-
-      // UPDATE DB
-      await ordersService.updateRemaining(
-        incomingOrder.id,
-        incomingOrder.remaining_quantity
-      );
-      await ordersService.updateRemaining(
-        bestOpp.id,
-        bestOpp.remaining_quantity
-      );
-
-      // UPDATE REDIS ORDERBOOK
-      await OrderBook.removeOrder(bestOpp);
-      if (bestOpp.remaining_quantity > 0) {
-        await OrderBook.addOrder(bestOpp);
-      }
-    }
-
-    // Incoming order update in Redis
-    await OrderBook.removeOrder(incomingOrder);
-    if (incomingOrder.remaining_quantity > 0) {
-      await OrderBook.addOrder(incomingOrder);
-    }
-
-    return trades;
-  },
-};
 module.exports = matchingEngine;
-module.exports.matchingEngine = matchingEngine;

@@ -1,7 +1,8 @@
+// services/ordersService.js
 const pool = require("../db");
 const { v4: uuidv4 } = require("uuid");
 const OrderBook = require("../orderbook/orderBook");
-const matchingEngine = require("../engine/matchingEngine");
+const Engine = require("../engine/Engine.js");
 
 // ----------------------------------------------------
 // CREATE ORDER
@@ -14,7 +15,10 @@ exports.createOrder = async (data, opts = {}) => {
   if (!data.side) throw new Error("side must be buy or sell");
   if (!data.type) throw new Error("type must be limit or market");
 
-  if (data.type === "limit" && !data.price)
+  if (
+    data.type === "limit" &&
+    (data.price === undefined || data.price === null)
+  )
     throw new Error("price required for limit order");
 
   // ------------------------------------------
@@ -30,7 +34,7 @@ exports.createOrder = async (data, opts = {}) => {
       const existingOrder = existing.rows[0];
       const trades = await pool.query(
         `SELECT * FROM trades WHERE buy_order_id=$1 OR sell_order_id=$1 ORDER BY traded_at DESC`,
-        [existingOrder.id]
+        [existingOrder.order_id]
       );
       return { order: existingOrder, trades: trades.rows };
     }
@@ -44,18 +48,18 @@ exports.createOrder = async (data, opts = {}) => {
 
     const insert = await client.query(
       `INSERT INTO orders
-        (id, client_id, instrument, side, type, price, quantity, remaining_quantity, status, idempotency_key)
+        (order_id, client_id, instrument, side, type, price, quantity, remaining_quantity, status, idempotency_key)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$7,'open',$8)
        RETURNING *`,
       [
-        orderId,
-        data.client_id,
-        data.instrument,
-        data.side,
-        data.type,
-        data.type === "limit" ? data.price : null,
-        data.quantity,
-        idempotencyKey,
+        orderId, // $1
+        data.client_id, // $2
+        data.instrument, // $3
+        data.side, // $4
+        data.type, // $5
+        data.price || null, // $6
+        data.quantity, // $7
+        idempotencyKey, // $8
       ]
     );
 
@@ -63,11 +67,23 @@ exports.createOrder = async (data, opts = {}) => {
 
     await client.query("COMMIT");
 
-    // Add to Redis orderbook
+    // Ensure remaining_quantity exists on returned object
+    if (
+      newOrder.remaining_quantity === null ||
+      newOrder.remaining_quantity === undefined
+    ) {
+      newOrder.remaining_quantity = newOrder.quantity;
+    }
+
+    // 1️⃣ Add to OrderBook (Redis) — OrderBook must persist order JSON keyed by order_id
     await OrderBook.addOrder(newOrder);
 
-    // Run matching engine
-    const trades = await matchingEngine.matchOrder(newOrder);
+    // 2️⃣ Trigger matching engine for that instrument.
+    // Engine.run will fetch orders from OrderBook itself and perform matching.
+    // It returns any trades executed for this instrument during this run.
+    console.log("🔍 Engine Loaded =", Engine);
+
+    const trades = await Engine.run(newOrder.instrument);
 
     return { order: newOrder, trades };
   } catch (err) {
@@ -83,7 +99,7 @@ exports.createOrder = async (data, opts = {}) => {
         const existingOrder = existing.rows[0];
         const trades = await pool.query(
           `SELECT * FROM trades WHERE buy_order_id=$1 OR sell_order_id=$1 ORDER BY traded_at DESC`,
-          [existingOrder.id]
+          [existingOrder.order_id]
         );
         return { order: existingOrder, trades: trades.rows };
       }
@@ -98,8 +114,10 @@ exports.createOrder = async (data, opts = {}) => {
 // ----------------------------------------------------
 // GET ORDER FUNCTIONS
 // ----------------------------------------------------
-exports.getOrderById = async (id) => {
-  const result = await pool.query(`SELECT * FROM orders WHERE id=$1`, [id]);
+exports.getOrderById = async (orderId) => {
+  const result = await pool.query(`SELECT * FROM orders WHERE order_id=$1`, [
+    orderId,
+  ]);
   return result.rows[0];
 };
 
@@ -130,7 +148,7 @@ exports.getOrdersByInstrument = async (instrument) => {
 // CANCEL ORDER
 // ----------------------------------------------------
 exports.cancelOrder = async (orderId) => {
-  const orderRes = await pool.query(`SELECT * FROM orders WHERE id=$1`, [
+  const orderRes = await pool.query(`SELECT * FROM orders WHERE order_id=$1`, [
     orderId,
   ]);
 
@@ -138,15 +156,22 @@ exports.cancelOrder = async (orderId) => {
 
   const order = orderRes.rows[0];
 
-  if (order.status === "filled" || order.remaining_quantity === 0) return null;
+  if (order.status === "filled" || Number(order.remaining_quantity) === 0)
+    return null;
 
   // Update DB
-  await pool.query(`UPDATE orders SET status='cancelled' WHERE id=$1`, [
+  await pool.query(`UPDATE orders SET status='cancelled' WHERE order_id=$1`, [
     orderId,
   ]);
 
-  // Remove from Redis
-  await OrderBook.removeOrder(order.id, order.instrument, order.side);
+  // Remove from OrderBook (best-effort)
+  try {
+    if (OrderBook && typeof OrderBook.removeOrder === "function") {
+      await OrderBook.removeOrder(order);
+    }
+  } catch (err) {
+    console.error("Failed to remove order from orderbook:", err.message || err);
+  }
 
   return order;
 };
@@ -156,10 +181,11 @@ exports.cancelOrder = async (orderId) => {
 // ----------------------------------------------------
 exports.updateRemaining = async (orderId, remainingQty) => {
   await pool.query(
-    `UPDATE orders 
-     SET remaining_quantity=$1,
-         status = CASE WHEN $1 = 0 THEN 'filled' ELSE 'open' END
-     WHERE id=$2`,
+    `UPDATE orders
+     SET remaining_quantity = $1,
+         status = CASE WHEN $1 = 0 THEN 'filled' ELSE 'open' END,
+         updated_at = now()
+     WHERE order_id = $2`,
     [remainingQty, orderId]
   );
 };
