@@ -13,7 +13,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// ✅ GET trades by orderId (must be before /:id)
+// GET trades by orderId (must be above /:id)
 router.get("/order/:orderId", tradesController.getTradesByOrder);
 
 // GET trade by ID

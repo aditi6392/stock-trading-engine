@@ -1,10 +1,9 @@
 const pool = require("../db");
 const { v4: uuidv4 } = require("uuid");
+const OrderBook = require("../services/orderBookService");
 const matchingEngine = require("../engine/matchingEngine");
 
-// ----------------------------------------------------
-// CREATE ORDER (Supports idempotency)
-// ----------------------------------------------------
+//create order
 exports.createOrder = async (data, opts = {}) => {
   const idempotencyKey = opts.idempotency_key || data.idempotency_key || null;
 
@@ -21,6 +20,7 @@ exports.createOrder = async (data, opts = {}) => {
       `SELECT * FROM orders WHERE idempotency_key = $1 LIMIT 1`,
       [idempotencyKey]
     );
+
     if (existing.rows.length > 0) {
       const existingOrder = existing.rows[0];
       const tradesRes = await pool.query(
@@ -59,14 +59,20 @@ exports.createOrder = async (data, opts = {}) => {
 
     await client.query("COMMIT");
 
+    // ----------------------------------------------------
+    // ADD ORDER TO REDIS ORDERBOOK
+    // ----------------------------------------------------
+    await OrderBook.addOrder(newOrder);
+
+    // ----------------------------------------------------
     // MATCHING ENGINE CALL
+    // ----------------------------------------------------
     const trades = await matchingEngine.matchOrder(newOrder);
 
     return { order: newOrder, trades };
   } catch (err) {
     await client.query("ROLLBACK");
 
-    // Handle unique violation on idempotency key
     if (err.code === "23505" && idempotencyKey) {
       const existing = await pool.query(
         `SELECT * FROM orders WHERE idempotency_key = $1 LIMIT 1`,
@@ -128,110 +134,31 @@ exports.getOrdersByInstrument = async (instrument) => {
   return result.rows;
 };
 
-// ----------------------------------------------------
-// ORDERBOOK (ONE INSTRUMENT)
-// ----------------------------------------------------
-exports.getOrderbook = async (instrument, levels = 5) => {
-  const result = await pool.query(
-    `SELECT price, remaining_quantity AS quantity, side
-     FROM orders
-     WHERE instrument = $1
-       AND type='limit'
-       AND status IN ('open','partially_filled')
-       AND price IS NOT NULL`,
-    [instrument]
+// Cancel order (remove from db + remove from orderbook)
+exports.cancelOrder = async (orderId) => {
+  // 1. Fetch order from DB
+  const order = await db.oneOrNone("SELECT * FROM orders WHERE id = $1", [orderId]);
+
+  if (!order) return null;
+
+  // 2. Remove/mark cancelled in DB
+  await db.none(
+    "UPDATE orders SET status = 'cancelled' WHERE id = $1",
+    [orderId]
   );
 
-  const bids = {};
-  const asks = {};
+  // 3. Remove from orderbook
+  await OrderBook.removeOrder(order.instrument, order.id, order.side);
 
-  for (let row of result.rows) {
-    const price = Number(row.price);
-    const qty = Number(row.quantity);
-
-    if (row.side === "buy") {
-      bids[price] = (bids[price] || 0) + qty;
-    } else {
-      asks[price] = (asks[price] || 0) + qty;
-    }
-  }
-
-  return {
-    bids: Object.keys(bids)
-      .map((p) => ({ price: Number(p), quantity: bids[p] }))
-      .sort((a, b) => b.price - a.price)
-      .slice(0, levels),
-
-    asks: Object.keys(asks)
-      .map((p) => ({ price: Number(p), quantity: asks[p] }))
-      .sort((a, b) => a.price - b.price)
-      .slice(0, levels),
-  };
+  return order;
 };
 
-// ----------------------------------------------------
-// FULL ORDERBOOK
-// ----------------------------------------------------
-exports.getFullOrderbook = async () => {
-  const result = await pool.query(
-    `SELECT instrument, price, remaining_quantity AS quantity, side
-     FROM orders
-     WHERE type='limit'
-       AND status IN ('open','partially_filled')`
+//db helper 
+exports.updateRemaining = async (orderId, remainingQty) => {
+  await pool.query(
+    `UPDATE orders SET remaining_quantity = $1,
+     status = CASE WHEN $1 = 0 THEN 'filled' ELSE 'open' END
+     WHERE id = $2`,
+    [remainingQty, orderId]
   );
-
-  const book = {};
-
-  for (let row of result.rows) {
-    if (!book[row.instrument]) {
-      book[row.instrument] = { bids: {}, asks: {} };
-    }
-
-    const price = Number(row.price);
-    const qty = Number(row.quantity);
-
-    if (row.side === "buy") {
-      book[row.instrument].bids[price] =
-        (book[row.instrument].bids[price] || 0) + qty;
-    } else {
-      book[row.instrument].asks[price] =
-        (book[row.instrument].asks[price] || 0) + qty;
-    }
-  }
-
-  const final = {};
-
-  for (let inst in book) {
-    final[inst] = {
-      bids: Object.keys(book[inst].bids)
-        .map((p) => ({ price: Number(p), quantity: book[inst].bids[p] }))
-        .sort((a, b) => b.price - a.price),
-
-      asks: Object.keys(book[inst].asks)
-        .map((p) => ({ price: Number(p), quantity: book[inst].asks[p] }))
-        .sort((a, b) => a.price - b.price),
-    };
-  }
-
-  return final;
-};
-
-// ----------------------------------------------------
-// CANCEL ORDER
-// ----------------------------------------------------
-exports.cancelOrder = async (id) => {
-  const res = await pool.query(`SELECT * FROM orders WHERE id=$1`, [id]);
-  const order = res.rows[0];
-
-  if (!order) throw new Error("Order not found");
-  if (order.status === "filled")
-    throw new Error("Cannot cancel a filled order");
-  if (order.status === "cancelled") throw new Error("Order already cancelled");
-
-  const result = await pool.query(
-    `UPDATE orders SET status='cancelled' WHERE id=$1 RETURNING *`,
-    [id]
-  );
-
-  return result.rows[0];
 };

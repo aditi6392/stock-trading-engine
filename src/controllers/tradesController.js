@@ -14,7 +14,7 @@ exports.getTradesByOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
 
-    const trades = await tradesService.getTradesByOrderId(orderId);
+    const trades = await tradesService.getTradesByOrder(orderId);
     return res.json(trades);
   } catch (err) {
     console.error("Error fetching order trades:", err);

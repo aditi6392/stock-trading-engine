@@ -2,19 +2,33 @@
 const ordersService = require("../services/ordersService");
 const matchingEngine = require("../engine/matchingEngine");
 //const matchingEngine = require("../engine/matchingEngine");
+const orderBook=require("../orderbook/orderBook");
 console.log("Loaded matchingEngine:", matchingEngine);
 
-// ----------------------------------------------------
-// CREATE ORDER (+ matching engine)
-// ----------------------------------------------------
 exports.createOrder = async (req, res) => {
   try {
-    // Let the service create the order AND call the matching engine.
-    const result = await ordersService.createOrder(req.body);
-    // result contains { order, trades }
-    res.json(result);
+    const orderData = req.body;
+
+    // 1️⃣ Create order in PostgreSQL
+    const newOrder = await ordersService.createOrder(orderData);
+
+    // Add remaining_quantity property
+    newOrder.remaining_quantity = newOrder.quantity;
+
+    // 2️⃣ Insert into Redis OrderBook
+    await OrderBook.addOrder(newOrder);
+
+    // 3️⃣ Call Matching Engine
+    const trades = await matchingEngine.matchOrder(newOrder);
+
+    // 4️⃣ Response
+    return res.status(201).json({
+      message: "Order created",
+      order: newOrder,
+      trades_executed: trades,
+    });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 };
 
@@ -69,39 +83,30 @@ exports.getOrdersByInstrument = async (req, res) => {
   }
 };
 
-// ----------------------------------------------------
-// GET ORDERBOOK FOR ONE INSTRUMENT
-// ----------------------------------------------------
+const OrderBook = require("../orderbook/orderBook");
+
 exports.getOrderbook = async (req, res) => {
-  try {
-    const instrument = req.params.instrument;
-    const levels = req.query.levels ? Number(req.query.levels) : 5;
+  const { instrument } = req.params;
 
-    const result = await ordersService.getOrderbook(instrument, levels);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch orderbook" });
-  }
+  const book = await OrderBook.getFullBook(instrument);
+  return res.json(book);
 };
-
 // ----------------------------------------------------
-// GET ORDERBOOK FOR ALL INSTRUMENTS
+// CANCEL ORDER
 // ----------------------------------------------------
-exports.getFullOrderbook = async (req, res) => {
-  try {
-    const result = await ordersService.getFullOrderbook();
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch full orderbook" });
-  }
-};
 exports.cancelOrder = async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const result = await ordersService.cancelOrder(orderId);
+    const { id } = req.params;
 
-    res.json({ message: "Order cancelled", order: result });
+    // cancel from DB + Redis orderbook
+    const result = await ordersService.cancelOrder(id);
+
+    if (!result) {
+      return res.status(404).json({ error: "Order not found or already completed" });
+    }
+
+    return res.json({ message: "Order cancelled successfully", order: result });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    return res.status(400).json({ error: err.message });
   }
 };
